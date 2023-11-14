@@ -56,16 +56,28 @@ class RenderImagesClearML(tf.keras.callbacks.Callback):
         )
 
 
+class ModelCheckpoint(tf.keras.callbacks.ModelCheckpoint):
+    def __init__(self, model, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._saved_model = model
+
+    def _save_model(self, epoch, batch, logs):
+        self.set_model(self._saved_model)
+        return super()._save_model(epoch, batch, logs)
+
+
 def get_default_callbacks(
-    save_dir: Path, monitor: tuple[str, str] = ("loss", "min")
+    model, save_dir: Path, monitor: tuple[str, str] = ("loss", "min")
 ) -> list[tf.keras.callbacks.Callback]:
     save_dir = Path(save_dir)
     callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
+        ModelCheckpoint(
+            model=model,
             filepath=str(Path(save_dir) / "models"),
             monitor=monitor[0],
             mode=monitor[1],
             save_best_only=True,
+            # save_weights_only=True,
         ),
         TensorBoard(
             log_dir=str(Path(save_dir) / "logs"),

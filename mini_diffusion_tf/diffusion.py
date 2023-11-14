@@ -169,6 +169,9 @@ class DiffusionModel(keras.Model):
 
         return {m.name: m.result() for m in self.metrics}
 
+    def test_step(self, data):
+        return self.train_step(data)
+
     def plot_images(
         self, epoch=None, logs=None, num_rows=3, num_cols=6, num_diffusion_steps=25
     ):
