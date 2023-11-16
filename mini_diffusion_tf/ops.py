@@ -45,6 +45,7 @@ def render_samples(
 
         plt.cla()
         plt.clf()
+        plt.close()
         return image
     else:
         plt.show()
