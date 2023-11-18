@@ -27,6 +27,7 @@ def render_samples(
     num_cols: int,
     num_rows: int,
     generated_images: list,
+    class_labels: list = None,
     as_pillow: bool = False,
     title: Optional[str] = None,
 ):
@@ -37,6 +38,8 @@ def render_samples(
         for col in range(num_cols):
             index = row * num_cols + col
             plt.subplot(num_rows, num_cols, index + 1)
+            if class_labels is not None:
+                plt.title("label: " + str(class_labels[index].numpy()))
             plt.imshow(generated_images[index])
             plt.axis("off")
     plt.tight_layout()

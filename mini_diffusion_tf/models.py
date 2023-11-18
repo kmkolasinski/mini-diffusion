@@ -14,6 +14,7 @@ class TimeDependentUNetModel(keras.Model):
         img_height,
         img_width,
         hdim: int = 320,
+        num_classes: int = None,
         num_downsampling_blocks: int = 2,
         num_upsampling_blocks: int = 3,
         num_heads: int = 2,
@@ -22,14 +23,26 @@ class TimeDependentUNetModel(keras.Model):
         time_input = keras.Input(shape=(), dtype=tf.int64, name="time_input")
         latent = keras.layers.Input((img_height, img_width, 3), name="images")
 
+        class_input = None
+        context = None
+        if num_classes is not None:
+            class_input = keras.layers.Input((), dtype=tf.int64, name="class_labels")
+            c_emb = tf.keras.layers.Embedding(num_classes, hdim)(class_input)
+            c_emb = keras.layers.Dense(hdim)(c_emb)
+            c_emb = keras.layers.Activation("swish")(c_emb)
+            c_emb = keras.layers.Dense(hdim)(c_emb)
+            context = tf.expand_dims(c_emb, axis=1)
+
         t_emb = TimeEmbedding(dim=hdim)(time_input)
         t_emb = keras.layers.Dense(hdim)(t_emb)
         t_emb = keras.layers.Activation("swish")(t_emb)
         t_emb = keras.layers.Dense(hdim)(t_emb)
 
         print("time_input:", time_input)
+        print("class_input:", class_input)
         print("latent:", latent)
         print("t_emb:", t_emb)
+        print("context:", context)
         groups = hdim // 8
         print("groups:", groups)
 
@@ -37,8 +50,6 @@ class TimeDependentUNetModel(keras.Model):
         outputs = []
         x = PaddedConv2D(hdim // 4, kernel_size=3, padding=1)(latent)
         outputs.append(x)
-
-        context = None
 
         for _ in range(num_downsampling_blocks):
             x = ResBlock(hdim // 4)([x, t_emb])
@@ -61,7 +72,10 @@ class TimeDependentUNetModel(keras.Model):
         for _ in range(num_downsampling_blocks):
             x = ResBlock(hdim)([x, t_emb])
             x = SpatialTransformer(
-                4 * num_heads, hdim // 4 // num_heads, fully_connected=True
+                4 * num_heads,
+                hdim // 4 // num_heads,
+                fully_connected=True,
+                has_context=context is not None,
             )([x, context])
             outputs.append(x)
         x = PaddedConv2D(hdim, 3, strides=2, padding=1)(x)  # Downsample 2x
@@ -75,10 +89,13 @@ class TimeDependentUNetModel(keras.Model):
 
         x = ResBlock(hdim)([x, t_emb])
         x = SpatialTransformer(
-            4 * num_heads, hdim // 4 // num_heads, fully_connected=True
+            4 * num_heads,
+            hdim // 4 // num_heads,
+            fully_connected=True,
+            has_context=context is not None,
         )([x, context])
         x = ResBlock(hdim)([x, t_emb])
-
+        print("Middle flow:", x.shape)
         # Upsampling flow
 
         for _ in range(num_upsampling_blocks):
@@ -90,7 +107,10 @@ class TimeDependentUNetModel(keras.Model):
             x = keras.layers.Concatenate()([x, outputs.pop()])
             x = ResBlock(hdim)([x, t_emb])
             x = SpatialTransformer(
-                4 * num_heads, hdim // 4 // num_heads, fully_connected=True
+                4 * num_heads,
+                hdim // 4 // num_heads,
+                fully_connected=True,
+                has_context=context is not None,
             )([x, context])
         x = Upsample(hdim)(x)
 
@@ -114,8 +134,11 @@ class TimeDependentUNetModel(keras.Model):
         x = keras.layers.GroupNormalization(groups=groups, epsilon=1e-5)(x)
         x = keras.layers.Activation("swish")(x)
         output = PaddedConv2D(3, kernel_size=3, padding=1)(x)
+        inputs = [latent, time_input]
+        if class_input is not None:
+            inputs.append(class_input)
 
-        super().__init__([latent, time_input], output, name=name)
+        super().__init__(inputs, output, name=name)
 
 
 class TimeEmbedding(layers.Layer):
@@ -186,7 +209,9 @@ class ResBlock(keras.layers.Layer):
 
 
 class SpatialTransformer(keras.layers.Layer):
-    def __init__(self, num_heads, head_size, fully_connected=False, **kwargs):
+    def __init__(
+        self, num_heads, head_size, fully_connected=False, has_context=False, **kwargs
+    ):
         super().__init__(**kwargs)
         self.norm = keras.layers.GroupNormalization(epsilon=1e-5)
         channels = num_heads * head_size
@@ -194,7 +219,7 @@ class SpatialTransformer(keras.layers.Layer):
             self.proj1 = keras.layers.Dense(num_heads * head_size)
         else:
             self.proj1 = PaddedConv2D(num_heads * head_size, 1)
-        self.transformer_block = BasicTransformerBlock(channels, num_heads, head_size)
+        self.transformer_block = BasicTransformerBlock(channels, num_heads, head_size, has_context)
         if fully_connected:
             self.proj2 = keras.layers.Dense(channels)
         else:
@@ -212,12 +237,15 @@ class SpatialTransformer(keras.layers.Layer):
 
 
 class BasicTransformerBlock(keras.layers.Layer):
-    def __init__(self, dim, num_heads, head_size, **kwargs):
+    def __init__(self, dim, num_heads, head_size, has_context=False, **kwargs):
         super().__init__(**kwargs)
         self.norm1 = keras.layers.LayerNormalization(epsilon=1e-5)
         self.attn1 = CrossAttention(num_heads, head_size)
-        # self.norm2 = keras.layers.LayerNormalization(epsilon=1e-5)
-        # self.attn2 = CrossAttention(num_heads, head_size)
+        self.has_context = has_context
+        if has_context:
+            self.norm2 = keras.layers.LayerNormalization(epsilon=1e-5)
+            self.attn2 = CrossAttention(num_heads, head_size)
+
         self.norm3 = keras.layers.LayerNormalization(epsilon=1e-5)
         # self.geglu = GEGLU(dim * 4)
         self.activation = tf.keras.activations.swish
@@ -226,7 +254,8 @@ class BasicTransformerBlock(keras.layers.Layer):
     def call(self, inputs):
         inputs, context = inputs
         x = self.attn1(self.norm1(inputs), context=None) + inputs
-        # x = self.attn2(self.norm2(x), context=context) + x
+        if self.has_context:
+            x = self.attn2(self.norm2(x), context=context) + x
         return self.dense(self.activation(self.norm3(x))) + x
 
 
